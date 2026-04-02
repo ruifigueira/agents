@@ -52,6 +52,13 @@ export class CdpSession {
     });
   }
 
+  isClosed(): boolean {
+    return (
+      this.#socket.readyState === WebSocket.CLOSED ||
+      this.#socket.readyState === WebSocket.CLOSING
+    );
+  }
+
   send(
     method: string,
     params?: unknown,
@@ -209,18 +216,38 @@ export class CdpSession {
 }
 
 /**
- * Connect to a browser via the Browser Rendering binding (Fetcher).
- * Establishes a CDP WebSocket through the binding's fetch interface.
+ * Create a new browser session via the Browser Rendering binding.
+ * Returns the sessionId without opening a WebSocket.
  */
-export async function connectBrowser(
+export async function createBrowserSession(browser: Fetcher): Promise<string> {
+  const response = await browser.fetch("http://localhost/v1/devtools/browser", {
+    method: "POST"
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Failed to create browser session: HTTP ${response.status}`
+    );
+  }
+  const { sessionId } = (await response.json()) as { sessionId: string };
+  if (!sessionId) {
+    throw new Error("Browser Rendering binding did not return a sessionId");
+  }
+  return sessionId;
+}
+
+/**
+ * Connect to an existing browser session via WebSocket.
+ */
+export async function connectBrowserSession(
   browser: Fetcher,
+  sessionId: string,
   timeoutMs?: number
 ): Promise<CdpSession> {
-  const response = await browser.fetch("http://localhost", {
-    headers: { Upgrade: "websocket" }
-  });
-
-  const ws = response.webSocket;
+  const wsResponse = await browser.fetch(
+    `http://localhost/v1/devtools/browser/${sessionId}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  const ws = wsResponse.webSocket;
   if (!ws) {
     throw new Error(
       "Browser Rendering binding did not return a WebSocket. " +
@@ -230,6 +257,18 @@ export async function connectBrowser(
 
   ws.accept();
   return new CdpSession(ws, timeoutMs);
+}
+
+/**
+ * Create a new browser session and connect to it.
+ * Convenience wrapper around createBrowserSession + connectBrowserSession.
+ */
+export async function connectBrowser(
+  browser: Fetcher,
+  timeoutMs?: number
+): Promise<CdpSession> {
+  const sessionId = await createBrowserSession(browser);
+  return connectBrowserSession(browser, sessionId, timeoutMs);
 }
 
 const LOCALHOST_HOSTS = new Set([

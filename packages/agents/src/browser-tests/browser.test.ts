@@ -253,39 +253,58 @@ describe("browser tools integration", () => {
       expect(Array.isArray(targets)).toBe(true);
     });
 
-    it("should create a page and navigate", async () => {
+    it("should take screenshot via CDP", async () => {
       const result = (await callAgent("testExecute", [
         `async () => {
-          const { targetId } = await cdp.send("Target.createTarget", { url: "about:blank" });
-          const sessionId = await cdp.attachToTarget(targetId);
-          await cdp.send("Page.enable", {}, { sessionId });
-          const nav = await cdp.send("Page.navigate", { url: "data:text/html,<h1>Hello CDP</h1>" }, { sessionId });
-          const { root } = await cdp.send("DOM.getDocument", {}, { sessionId });
-          const { outerHTML } = await cdp.send("DOM.getOuterHTML", { nodeId: root.nodeId }, { sessionId });
-          await cdp.send("Target.closeTarget", { targetId });
-          return { frameId: nav.frameId, html: outerHTML };
+          await page.goto("data:text/html,<h1>Hello CDP</h1>");
+          const { data } = await cdp.send("Page.captureScreenshot", { format: "png" });
+          return { hasData: !!data, dataLength: data.length };
         }`
       ])) as { text: string; isError?: boolean };
 
       expect(result.isError).toBeFalsy();
-      const page = JSON.parse(result.text);
-      expect(page.frameId).toBeTruthy();
-      expect(page.html).toContain("Hello CDP");
+      const screenshot = JSON.parse(result.text);
+      expect(screenshot.hasData).toBe(true);
+      expect(screenshot.dataLength).toBeGreaterThan(100);
     });
 
-    it("should access the debug log", async () => {
+    it("should get DOM via CDP", async () => {
       const result = (await callAgent("testExecute", [
         `async () => {
-          await cdp.send("Browser.getVersion");
-          const log = await cdp.getDebugLog(10);
-          return { logLength: log.length, hasSend: log.some(e => e.type === "send") };
+          await page.goto("data:text/html,<h1>Hello CDP</h1>");
+          const { root } = await cdp.send("DOM.getDocument");
+          const { outerHTML } = await cdp.send("DOM.getOuterHTML", { nodeId: root.nodeId });
+          return { html: outerHTML };
         }`
       ])) as { text: string; isError?: boolean };
 
       expect(result.isError).toBeFalsy();
-      const debug = JSON.parse(result.text);
-      expect(debug.logLength).toBeGreaterThan(0);
-      expect(debug.hasSend).toBe(true);
+      const dom = JSON.parse(result.text);
+      expect(dom.html).toContain("Hello CDP");
+    });
+
+    it("should capture CDP events with cdp.on() callback", async () => {
+      const result = (await callAgent("testExecute", [
+        `async () => {
+          // Collect events via callback — this works because events are
+          // dispatched locally in the sandbox via the stream-based bridge
+          const events = [];
+          cdp.on("Page.frameNavigated", (params) => {
+            events.push(params);
+          });
+          await cdp.send("Page.enable");
+          await page.goto("https://example.com");
+          return {
+            count: events.length,
+            hasFrame: events.length > 0 && typeof events[0].frame === "object"
+          };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(result.isError).toBeFalsy();
+      const data = JSON.parse(result.text);
+      expect(data.count).toBeGreaterThan(0);
+      expect(data.hasFrame).toBe(true);
     });
 
     it("should handle CDP errors gracefully", async () => {
@@ -302,7 +321,102 @@ describe("browser tools integration", () => {
       ])) as { text: string; isError?: boolean };
 
       expect(result.isError).toBe(true);
-      expect(result.text).toContain("Error");
+      expect(result.text).toContain("execute test error");
+    });
+
+    // ── Sequential call tests ──────────────────────────────────────
+
+    it("should handle multiple sequential execute calls", async () => {
+      // First call - should succeed
+      const result1 = (await callAgent("testExecute", [
+        'async () => { return await cdp.send("Browser.getVersion"); }'
+      ])) as { text: string; isError?: boolean };
+
+      expect(result1.isError).toBeFalsy();
+      const version1 = JSON.parse(result1.text);
+      expect(version1).toHaveProperty("product");
+
+      // Second call - this is where the bug might manifest
+      const result2 = (await callAgent("testExecute", [
+        'async () => { return await cdp.send("Browser.getVersion"); }'
+      ])) as { text: string; isError?: boolean };
+
+      expect(result2.isError).toBeFalsy();
+      const version2 = JSON.parse(result2.text);
+      expect(version2).toHaveProperty("product");
+
+      // Third call for good measure
+      const result3 = (await callAgent("testExecute", [
+        'async () => { return await cdp.send("Browser.getVersion"); }'
+      ])) as { text: string; isError?: boolean };
+
+      expect(result3.isError).toBeFalsy();
+      const version3 = JSON.parse(result3.text);
+      expect(version3).toHaveProperty("product");
+    });
+
+    // ── Page method tests ──────────────────────────────────────────
+
+    it("should navigate with page.goto()", async () => {
+      const result = (await callAgent("testExecute", [
+        `async () => {
+          const response = await page.goto("data:text/html,<h1>Hello Page</h1>");
+          const url = await page.url();
+          return { status: response.status, responseUrl: response.url, pageUrl: url };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(result.isError).toBeFalsy();
+      const nav = JSON.parse(result.text);
+      expect(nav.status).toBe(200);
+      expect(nav.pageUrl).toContain("data:text/html");
+    });
+
+    it("should get page title and URL", async () => {
+      const result = (await callAgent("testExecute", [
+        `async () => {
+          await page.goto("data:text/html,<title>Test Page</title><h1>Content</h1>");
+          return { title: await page.title(), url: await page.url() };
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(result.isError).toBeFalsy();
+      const info = JSON.parse(result.text);
+      expect(info.title).toBe("Test Page");
+      expect(info.url).toContain("data:text/html");
+    });
+
+    it("should capture accessibility snapshot as text", async () => {
+      const result = (await callAgent("testExecute", [
+        `async () => {
+          await page.goto("data:text/html,<h1>Hello</h1><button>Click me</button><input type='text' placeholder='Enter name'>");
+          const snapshot = await page.captureSnapshot({ format: "text" });
+          return snapshot;
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(result.isError).toBeFalsy();
+      // Should contain multiple elements, not just the root
+      expect(result.text).toContain("heading");
+      expect(result.text).toContain("Hello");
+      expect(result.text).toContain("button");
+      expect(result.text).toContain("Click me");
+      expect(result.text).toContain("textbox");
+    });
+
+    it("should capture accessibility snapshot as tree", async () => {
+      const result = (await callAgent("testExecute", [
+        `async () => {
+          await page.goto("data:text/html,<h1>Hello</h1><button>Click me</button>");
+          const tree = await page.captureSnapshot({ format: "tree" });
+          return tree;
+        }`
+      ])) as { text: string; isError?: boolean };
+
+      expect(result.isError).toBeFalsy();
+      const tree = JSON.parse(result.text);
+      expect(tree.role).toBe("RootWebArea");
+      expect(tree.children.length).toBeGreaterThan(0);
     });
   });
 });

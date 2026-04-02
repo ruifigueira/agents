@@ -7,6 +7,13 @@ export {
 } from "./cdp-session";
 
 export {
+  CdpProxy,
+  CdpSessionManager,
+  type CdpProxyEnv,
+  type CdpProxyProps
+} from "./cdp-proxy";
+
+export {
   type BrowserToolsOptions,
   type ToolResult,
   createBrowserToolHandlers

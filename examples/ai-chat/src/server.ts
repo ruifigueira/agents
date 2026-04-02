@@ -11,6 +11,8 @@ import {
 } from "ai";
 import { z } from "zod";
 
+export { CdpProxy } from "agents/browser";
+
 /**
  * AI Chat Agent showcasing @cloudflare/ai-chat features:
  * - streamText with toUIMessageStreamResponse (simplest pattern)
@@ -60,7 +62,9 @@ export class ChatAgent extends AIChatAgent {
     const browserTools = createBrowserTools({
       browser: this.env.BROWSER,
       cdpUrl: this.env.CDP_BASE_URL || undefined,
-      loader: this.env.LOADER
+      loader: this.env.LOADER,
+      // @ts-expect-error — types not yet updated for ctx.exports
+      exports: this.ctx.exports
     });
     const workersai = createWorkersAI({ binding: this.env.AI });
 

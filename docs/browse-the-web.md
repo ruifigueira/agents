@@ -62,13 +62,19 @@ chrome --headless --remote-debugging-port=9222
 
 ### 2. Create browser tools
 
+Inside an Agent or Durable Object, create browser tools with `ctx.exports`:
+
 ```typescript
 import { createBrowserTools } from "agents/browser/ai";
 
+export { CdpProxy } from "agents/browser";
+
+// Inside your Agent class:
 const browserTools = createBrowserTools({
-  browser: env.BROWSER, // Browser Rendering binding (production)
-  cdpUrl: env.CDP_BASE_URL, // Local Chrome URL (development)
-  loader: env.LOADER
+  browser: this.env.BROWSER,
+  cdpUrl: this.env.CDP_BASE_URL,
+  loader: this.env.LOADER,
+  exports: this.ctx.exports
 });
 ```
 
@@ -131,12 +137,15 @@ import { Agent } from "agents";
 import { createBrowserTools } from "agents/browser/ai";
 import { streamText, convertToModelMessages, stepCountIs } from "ai";
 
+export { CdpProxy } from "agents/browser";
+
 export class MyAgent extends Agent<Env> {
   async onChatMessage() {
     const browserTools = createBrowserTools({
       browser: this.env.BROWSER,
       cdpUrl: this.env.CDP_BASE_URL || undefined,
-      loader: this.env.LOADER
+      loader: this.env.LOADER,
+      exports: this.ctx.exports
     });
 
     const result = streamText({
@@ -163,10 +172,14 @@ For TanStack AI, use the `/tanstack-ai` export:
 import { createBrowserTools } from "agents/browser/tanstack-ai";
 import { chat } from "@tanstack/ai";
 
+export { CdpProxy } from "agents/browser";
+
+// Inside your Agent class:
 const browserTools = createBrowserTools({
-  browser: env.BROWSER,
-  cdpUrl: env.CDP_BASE_URL,
-  loader: env.LOADER
+  browser: this.env.BROWSER,
+  cdpUrl: this.env.CDP_BASE_URL,
+  loader: this.env.LOADER,
+  exports: this.ctx.exports
 });
 
 const stream = chat({

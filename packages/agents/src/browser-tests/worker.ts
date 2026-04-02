@@ -1,5 +1,9 @@
 import { Agent, callable, routeAgentRequest } from "agents";
 import { createBrowserToolHandlers, type ToolResult } from "../browser/shared";
+import type { CdpProxyProps } from "../browser/cdp-proxy";
+
+// Re-export CdpProxy so it's available via ctx.exports
+export { CdpProxy } from "../browser/cdp-proxy";
 
 type Env = {
   BROWSER: Fetcher;
@@ -9,12 +13,22 @@ type Env = {
 };
 
 export class BrowserTestAgent extends Agent<Env> {
+  // Cache the handler instance to enable browser session reuse across calls
+  #handlers?: ReturnType<typeof createBrowserToolHandlers>;
+
   #getHandlers() {
-    return createBrowserToolHandlers({
+    // @ts-expect-error — ctx.exports is experimental
+    const exports = this.ctx.exports as {
+      CdpProxy: (options: { props: CdpProxyProps }) => Fetcher;
+    };
+
+    this.#handlers ??= createBrowserToolHandlers({
       browser: this.env.BROWSER,
       cdpUrl: this.env.CDP_BASE_URL || undefined,
-      loader: this.env.LOADER
+      loader: this.env.LOADER,
+      exports
     });
+    return this.#handlers;
   }
 
   @callable()

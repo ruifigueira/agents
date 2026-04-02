@@ -58,7 +58,9 @@ export function createBrowserTools(options: BrowserToolsOptions): ToolSet {
       inputSchema: z.object({
         code: z
           .string()
-          .describe("JavaScript async arrow function that uses the cdp helper")
+          .describe(
+            "JavaScript async arrow function that uses page (Puppeteer) or cdp (raw CDP) objects"
+          )
       }),
       execute: async ({ code }) => {
         const result = await handlers.execute(code);
