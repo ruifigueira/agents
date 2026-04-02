@@ -4,6 +4,7 @@ export {
   type DynamicWorkerExecutorOptions,
   type Executor,
   type ExecuteResult,
+  type ModuleImportSpec,
   type ResolvedProvider,
   type ToolProvider
 } from "./executor";

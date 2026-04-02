@@ -151,6 +151,16 @@ export class ToolDispatcher extends RpcTarget {
 
 // ── DynamicWorkerExecutor ─────────────────────────────────────────────
 
+/**
+ * Declares how injected modules should be wired into the sandbox.
+ */
+export interface ModuleImportSpec {
+  /** Named exports to hoist as root-level globals in the sandbox. */
+  globals: string[];
+  /** Name of an exported async init function to call before user code runs. */
+  init?: string;
+}
+
 export interface DynamicWorkerExecutorOptions {
   loader: WorkerLoader;
   /**
@@ -171,6 +181,12 @@ export interface DynamicWorkerExecutorOptions {
    * Note: the key `"executor.js"` is reserved and will be ignored if provided.
    */
   modules?: Record<string, string>;
+  /**
+   * Declares how injected modules should be wired into the sandbox.
+   * For each module specifier, specify which named exports become globals
+   * and which init function to call before user code runs.
+   */
+  imports?: Record<string, ModuleImportSpec>;
 }
 
 /**
@@ -196,6 +212,7 @@ export class DynamicWorkerExecutor implements Executor {
   #timeout: number;
   #globalOutbound: Fetcher | null;
   #modules: Record<string, string>;
+  #imports: Record<string, ModuleImportSpec>;
 
   constructor(options: DynamicWorkerExecutorOptions) {
     this.#loader = options.loader;
@@ -203,6 +220,7 @@ export class DynamicWorkerExecutor implements Executor {
     this.#globalOutbound = options.globalOutbound ?? null;
     const { "executor.js": _, ...safeModules } = options.modules ?? {};
     this.#modules = safeModules;
+    this.#imports = options.imports ?? {};
   }
 
   async execute(
@@ -278,8 +296,27 @@ export class DynamicWorkerExecutor implements Executor {
       );
     });
 
+    // Generate import statements and init calls for injected modules
+    const moduleImports: string[] = [];
+    const moduleInits: string[] = [];
+    for (const [specifier, spec] of Object.entries(this.#imports)) {
+      const names = [...spec.globals];
+      if (spec.init && !names.includes(spec.init)) {
+        names.push(spec.init);
+      }
+      if (names.length > 0) {
+        moduleImports.push(
+          `import { ${names.join(", ")} } from ${JSON.stringify(specifier)};`
+        );
+      }
+      if (spec.init) {
+        moduleInits.push(`    await ${spec.init}();`);
+      }
+    }
+
     const executorModule = [
       'import { WorkerEntrypoint } from "cloudflare:workers";',
+      ...moduleImports,
       "",
       "export default class CodeExecutor extends WorkerEntrypoint {",
       "  async evaluate(__dispatchers = {}) {",
@@ -287,6 +324,7 @@ export class DynamicWorkerExecutor implements Executor {
       '    console.log = (...a) => { __logs.push(a.map(String).join(" ")); };',
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
+      ...moduleInits,
       ...proxyInits,
       "",
       "    try {",
