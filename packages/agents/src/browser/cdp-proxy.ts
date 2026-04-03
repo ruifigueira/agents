@@ -82,7 +82,7 @@ const LOCALHOST_HOSTS = new Set([
  */
 export class CdpProxy extends WorkerEntrypoint<CdpProxyEnv, CdpProxyProps> {
   /**
-   * Handle fetch requests — only allows WebSocket upgrades to the CDP endpoint.
+   * Handle fetch requests — WebSocket upgrades to CDP and HTTP GET for /json/protocol.
    */
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -92,7 +92,12 @@ export class CdpProxy extends WorkerEntrypoint<CdpProxyEnv, CdpProxyProps> {
       return new Response("Not found", { status: 404 });
     }
 
-    // Only WebSocket upgrades allowed
+    // Handle /json/protocol HTTP GET
+    if (url.pathname === "/json/protocol" && request.method === "GET") {
+      return this.#fetchProtocol();
+    }
+
+    // Only WebSocket upgrades allowed for other paths
     const upgradeHeader = request.headers.get("Upgrade");
     if (upgradeHeader?.toLowerCase() !== "websocket") {
       return new Response("Only WebSocket connections supported", {
@@ -160,6 +165,55 @@ export class CdpProxy extends WorkerEntrypoint<CdpProxyEnv, CdpProxyProps> {
   }
 
   /**
+   * Fetch the CDP protocol spec from the browser.
+   */
+  async #fetchProtocol(): Promise<Response> {
+    const props = this.ctx.props;
+
+    // Mode 1: Browser Rendering binding (production)
+    if (props?.sessionId) {
+      const browser = this.env.BROWSER;
+      if (!browser) {
+        console.error(
+          "[CdpProxy] BROWSER binding not found in env. Available keys:",
+          Object.keys(this.env)
+        );
+        return new Response("Browser binding not configured", { status: 500 });
+      }
+
+      try {
+        return await browser.fetch(
+          `http://localhost/v1/devtools/browser/${props.sessionId}/json/protocol`
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[CdpProxy] browser.fetch error:", message);
+        return new Response(`Failed to fetch protocol: ${message}`, {
+          status: 502
+        });
+      }
+    }
+
+    // Mode 2: CDP URL (local dev)
+    if (props?.cdpUrl) {
+      try {
+        const protocolUrl = new URL("/json/protocol", props.cdpUrl).toString();
+        return await fetch(protocolUrl, { headers: props.cdpHeaders });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return new Response(`Failed to fetch protocol: ${message}`, {
+          status: 502
+        });
+      }
+    }
+
+    return new Response(
+      "Either sessionId or cdpUrl must be provided in props",
+      { status: 500 }
+    );
+  }
+
+  /**
    * Discover the WebSocket debugger URL from a CDP base URL.
    */
   async #discoverWebSocketUrl(
@@ -192,6 +246,113 @@ export class CdpProxy extends WorkerEntrypoint<CdpProxyEnv, CdpProxyProps> {
     parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
     return parsed.toString();
   }
+}
+
+// ── Protocol Normalization ───────────────────────────────────────────
+
+/**
+ * Raw CDP protocol types as returned by /json/protocol endpoint.
+ */
+interface RawProtocol {
+  domains?: RawDomain[];
+}
+
+interface RawDomain {
+  domain: string;
+  description?: string;
+  experimental?: boolean;
+  deprecated?: boolean;
+  dependencies?: string[];
+  commands?: RawCommand[];
+  events?: RawEvent[];
+  types?: RawType[];
+}
+
+interface RawCommand {
+  name: string;
+  description?: string;
+  experimental?: boolean;
+  deprecated?: boolean;
+}
+
+interface RawEvent {
+  name: string;
+  description?: string;
+  experimental?: boolean;
+  deprecated?: boolean;
+}
+
+interface RawType {
+  id: string;
+  description?: string;
+  experimental?: boolean;
+  deprecated?: boolean;
+}
+
+/**
+ * Normalize the raw CDP protocol to the format expected by the search executor.
+ * Transforms `domain.domain` to `name` and adds `method`/`event` fields.
+ */
+function normalizeProtocol(raw: RawProtocol): { domains: NormalizedDomain[] } {
+  const domains = (raw.domains ?? []).map((domain) => ({
+    name: domain.domain,
+    description: domain.description,
+    experimental: Boolean(domain.experimental),
+    deprecated: Boolean(domain.deprecated),
+    dependencies: [...(domain.dependencies ?? [])],
+    commands: (domain.commands ?? []).map((cmd) => ({
+      name: cmd.name,
+      method: `${domain.domain}.${cmd.name}`,
+      description: cmd.description,
+      experimental: Boolean(cmd.experimental),
+      deprecated: Boolean(cmd.deprecated)
+    })),
+    events: (domain.events ?? []).map((evt) => ({
+      name: evt.name,
+      event: `${domain.domain}.${evt.name}`,
+      description: evt.description,
+      experimental: Boolean(evt.experimental),
+      deprecated: Boolean(evt.deprecated)
+    })),
+    types: (domain.types ?? []).map((type) => ({
+      id: type.id,
+      name: `${domain.domain}.${type.id}`,
+      description: type.description,
+      experimental: Boolean(type.experimental),
+      deprecated: Boolean(type.deprecated)
+    }))
+  }));
+
+  return { domains };
+}
+
+interface NormalizedDomain {
+  name: string;
+  description?: string;
+  experimental: boolean;
+  deprecated: boolean;
+  dependencies: string[];
+  commands: Array<{
+    name: string;
+    method: string;
+    description?: string;
+    experimental: boolean;
+    deprecated: boolean;
+  }>;
+  events: Array<{
+    name: string;
+    event: string;
+    description?: string;
+    experimental: boolean;
+    deprecated: boolean;
+  }>;
+  types: Array<{
+    id: string;
+    name: string;
+    description?: string;
+    experimental: boolean;
+    deprecated: boolean;
+  }>;
 }
 
 // ── CdpSessionManager ────────────────────────────────────────────────
@@ -249,6 +410,7 @@ export class CdpSessionManager {
   #cdpHeaders: Record<string, string> | undefined;
   #exports: CdpSessionManagerOptions["exports"];
   #sessionId: string | undefined;
+  #protocol: unknown | undefined;
 
   constructor(options: CdpSessionManagerOptions) {
     this.#browser = options.browser;
@@ -324,29 +486,29 @@ export class CdpSessionManager {
   }
 
   /**
-   * Clear the cached session ID.
+   * Get the CDP protocol spec, fetching and caching it if needed.
+   * The protocol spec doesn't change during a session, so we cache it.
+   */
+  async getProtocol(): Promise<unknown> {
+    if (this.#protocol) {
+      return this.#protocol;
+    }
+
+    const proxy = await this.getProxy();
+    const response = await proxy.fetch("http://cdp/json/protocol");
+    if (!response.ok) {
+      throw new Error(`Failed to fetch CDP protocol: ${response.status}`);
+    }
+
+    this.#protocol = await response.json();
+    return this.#protocol;
+  }
+
+  /**
+   * Clear the cached session ID and protocol.
    */
   clearSession(): void {
     this.#sessionId = undefined;
+    this.#protocol = undefined;
   }
-}
-
-// ── Legacy exports ───────────────────────────────────────────────────
-
-/**
- * @deprecated Use `new CdpSessionManager(options)` instead.
- */
-export function createCdpProxyFetcher(options: CdpSessionManagerOptions) {
-  const manager = new CdpSessionManager(options);
-  return {
-    getOrCreateSession: () => manager.getOrCreateSession(),
-    getProxy: () => manager.getProxy(),
-    get sessionId() {
-      return manager.sessionId;
-    },
-    set sessionId(id: string | undefined) {
-      manager.sessionId = id;
-    },
-    clearSession: () => manager.clearSession()
-  };
 }

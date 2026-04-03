@@ -3,9 +3,7 @@ import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { BROWSER_CLIENT_MODULE } from "./browser-client";
 import { truncateResponse } from "./truncate";
 import { CdpSessionManager, type CdpProxyProps } from "./cdp-proxy";
-import spec from "./data/cdp/spec.json";
-import summary from "./data/cdp/summary.json";
-import { CDP_DOMAINS } from "./data/cdp/domains";
+import { CDP_DOMAINS, CDP_SUMMARY } from "./data/cdp/summary";
 
 export interface BrowserToolsOptions {
   /** Browser Rendering binding (Fetcher) — required for production */
@@ -29,7 +27,7 @@ export interface BrowserToolsOptions {
 
 export const SEARCH_DESCRIPTION = `Search the Chrome DevTools Protocol spec using JavaScript code.
 
-Source totals: ${summary.totals.domains} domains, ${summary.totals.commands} commands, ${summary.totals.events} events, ${summary.totals.types} types.
+Source totals: ${CDP_SUMMARY.totals.domains} domains, ${CDP_SUMMARY.totals.commands} commands, ${CDP_SUMMARY.totals.events} events, ${CDP_SUMMARY.totals.types} types.
 Top domains: ${CDP_DOMAINS.slice(0, 20).join(", ")}...
 
 Available in your code:
@@ -37,11 +35,11 @@ Available in your code:
 declare const spec: {
   get(): Promise<{
     domains: Array<{
-      name: string;
+      domain: string;
       description?: string;
-      commands: Array<{ name: string; method: string; description?: string }>;
-      events: Array<{ name: string; event: string; description?: string }>;
-      types: Array<{ id: string; name: string; description?: string }>;
+      commands?: Array<{ name: string; description?: string }>;
+      events?: Array<{ name: string; description?: string }>;
+      types?: Array<{ id: string; description?: string }>;
     }>;
   }>;
 };
@@ -52,9 +50,9 @@ Example:
 async () => {
   const s = await spec.get();
   return s.domains
-    .find(d => d.name === "Network")
+    .find(d => d.domain === "Network")
     .commands.filter(c => c.description?.toLowerCase().includes("intercept"))
-    .map(c => ({ method: c.method, description: c.description }));
+    .map(c => ({ method: \`Network.\${c.name}\`, description: c.description }));
 }`;
 
 export const EXECUTE_DESCRIPTION = `Execute browser automation code using page and CDP APIs.
@@ -305,7 +303,6 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
     loader: options.loader,
     timeout: options.timeout
   });
-  const specData = spec;
 
   // Session manager handles browser session creation and CdpProxy creation
   const sessionManager = new CdpSessionManager({
@@ -323,7 +320,11 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
       const providers: ResolvedProvider[] = [
         {
           name: "spec",
-          fns: { get: async () => specData }
+          fns: {
+            get: async () => {
+              return await sessionManager.getProtocol();
+            }
+          }
         }
       ];
       const result = await searchExecutor.execute(code, providers);
